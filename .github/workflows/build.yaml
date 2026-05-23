@@ -34,8 +34,12 @@ jobs:
         with:
           go-version: '1.26'
       - name: go test
+        # No -race here: requires cgo, but our build is CGO_ENABLED=0
+        # for a static binary, and the ARC runner is alpine-without-gcc.
+        # Local devs can still `go test -race ./...` against their own
+        # toolchain; CI just runs the deterministic + statistical tests.
         run: |
-          go test -race -cover ./...
+          go test -cover ./...
 
   build:
     needs: test
