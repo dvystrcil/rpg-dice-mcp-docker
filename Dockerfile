@@ -1,15 +1,19 @@
-# Two-target build matching the dvystrcil/mcp-server-docker pattern.
+# Two-target build.
 #
-#   prod   (default)  →  FROM alpine, with ca-certificates only
-#   debug             →  same base, room for future incident-time
-#                        additions (curl, dig, etc.) without bloating prod
+#   prod   (default)  →  FROM scratch — static Go binary only.
+#   debug             →  FROM alpine — adds curl/bash for incident triage.
 #
-# Unlike mcp-server-docker which dispatches bash scripts (and therefore
-# bundles bash + kubectl + jq + curl in the prod image), rpg-dice-mcp's
-# tools are statically-compiled Go logic — there's no script dispatch.
-# Prod only needs ca-certificates (so the streamable HTTP server's
-# clients can verify the cluster CA on outbound calls, if any future
-# tool ends up making them).
+# Why scratch is correct here (and differs from mcp-server-docker):
+#   - mcp-server-docker dispatches bash scripts and bundles bash +
+#     kubectl + jq + curl in prod. It needs an OS in the image.
+#   - rpg-dice-mcp is pure Go logic. CGO_ENABLED=0 statically compiles
+#     the binary; there is no script dispatch, no outbound HTTP, no
+#     CA verification needed. A scratch image is sufficient and
+#     smaller (~5 MB final vs ~15 MB on alpine).
+#
+# We DO need a /etc/passwd entry so USER directive can resolve a
+# non-root user. The build stage creates a minimal passwd-and-group
+# pair which the prod stage copies in.
 
 FROM golang:1.26-alpine AS build
 WORKDIR /src
@@ -19,17 +23,29 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux \
     go build -ldflags='-s -w' -trimpath \
     -o /out/rpg-dice-mcp ./cmd/rpg-dice-mcp
+# Build a minimal passwd/group file with a non-root user so the
+# scratch image can USER-switch. uid 10001 matches the deploy
+# manifest's runAsUser.
+RUN echo 'app:x:10001:10001::/:/sbin/nologin' > /out/passwd && \
+    echo 'app:x:10001:' > /out/group
 
-FROM alpine:3 AS prod
-RUN apk add --no-cache ca-certificates && \
-    addgroup -S app && adduser -S -G app -u 10001 app
+FROM scratch AS prod
+COPY --from=build /out/passwd /etc/passwd
+COPY --from=build /out/group /etc/group
 COPY --from=build /out/rpg-dice-mcp /usr/local/bin/rpg-dice-mcp
 USER app
 EXPOSE 8080
 ENV HTTP_ADDR=:8080
 ENTRYPOINT ["/usr/local/bin/rpg-dice-mcp"]
 
-FROM prod AS debug
-USER root
-RUN apk add --no-cache curl bash
+# Debug target — adds shell + curl for incident-time triage.
+# Built on alpine because scratch obviously has no apk; this is a
+# deliberate departure from prod's base for diagnostic purposes only.
+FROM alpine:3 AS debug
+RUN apk add --no-cache ca-certificates curl bash && \
+    addgroup -S app && adduser -S -G app -u 10001 app
+COPY --from=build /out/rpg-dice-mcp /usr/local/bin/rpg-dice-mcp
 USER app
+EXPOSE 8080
+ENV HTTP_ADDR=:8080
+ENTRYPOINT ["/usr/local/bin/rpg-dice-mcp"]
