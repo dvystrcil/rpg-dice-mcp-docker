@@ -46,7 +46,7 @@ jobs:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: rpg-dice-mcp-docker-runner
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - uses: actions/checkout@v6
@@ -68,6 +68,12 @@ jobs:
           registry: ${{ env.INTERNAL_REGISTRY }}
           username: ${{ env.HB_USERNAME }}
           password: ${{ env.HB_PASSWORD }}
+
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ env.CICD_APP_CLIENT_ID }}
+          private-key: ${{ env.CICD_APP_PRIVATE_KEY }}
 
       - uses: docker/setup-qemu-action@v4
 
@@ -104,6 +110,13 @@ jobs:
         run: |
           echo "Built: ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Deploy:" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "    kubectl -n rpg-dice-mcp rollout restart deploy/rpg-dice-mcp" >> $GITHUB_STEP_SUMMARY
+          echo "image-updater picks up the new semver tag from docker-release.yaml" >> $GITHUB_STEP_SUMMARY
+          echo "(release-publish retags Harbor :dev as :X.Y.Z; IU writes back to dvystrcil/rpg-dice-mcp)." >> $GITHUB_STEP_SUMMARY
+
+      - name: Create GitHub release
+        # Patch++ off the latest release; release-publish fires
+        # docker-release.yaml which retags Harbor :dev as :X.Y.Z (no v
+        # per canonical homelab style). image-updater picks it up.
+        uses: dvystrcil/release-action@v0.1.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
