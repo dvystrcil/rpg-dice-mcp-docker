@@ -10,10 +10,27 @@ import (
 	"fmt"
 
 	"github.com/dvystrcil/rpg-dice-mcp-docker/internal/dice"
+	"github.com/dvystrcil/rpg-dice-mcp-docker/internal/format"
 	"github.com/dvystrcil/rpg-dice-mcp-docker/internal/tor"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// formatSchema is the shared shape of the `format` parameter on the TOR
+// resolution tools. Optional; defaults to "none" (caller does its own
+// rendering from the structured fields).
+var formatSchema = &jsonschema.Schema{
+	Type: "string",
+	Description: "Optional rendering style. When set, the response includes a " +
+		"`formatted` field with the result as a display-ready string. Values: " +
+		"\"html_tor\" (HTML with .fdie/.sdie span classes for the homelab CSS " +
+		"theme — use this from the OWUI Loremaster surface and the dice-roller " +
+		"web app), \"plain\" (no markup, for terminals/logs), \"markdown\" " +
+		"(emoji + bold for Discord/Slack), or \"none\" (default — no formatted " +
+		"field). The structured fields (feat_die, success_dice, etc.) are " +
+		"always present regardless of format.",
+	Enum: []any{"none", "html_tor", "plain", "markdown"},
+}
 
 // RegisterAll attaches every dice-mcp tool to the given server.
 // Returns the ordered list of registered tool names, useful for
@@ -148,6 +165,7 @@ func addRollTORCheck(server *mcp.Server) {
 					Type:        "boolean",
 					Description: "When true, an Eye result sets MiserableEye in the response for Hope/Shadow bookkeeping.",
 				},
+				"format": formatSchema,
 			},
 			Required: []string{"skill_rating", "target_number"},
 		},
@@ -157,10 +175,11 @@ func addRollTORCheck(server *mcp.Server) {
 
 func handleRollTORCheck(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var args struct {
-		SkillRating  int  `json:"skill_rating"`
-		TargetNumber int  `json:"target_number"`
-		Weariness    bool `json:"weariness"`
-		Miserable    bool `json:"miserable"`
+		SkillRating  int    `json:"skill_rating"`
+		TargetNumber int    `json:"target_number"`
+		Weariness    bool   `json:"weariness"`
+		Miserable    bool   `json:"miserable"`
+		Format       string `json:"format"`
 	}
 	if e := decodeArgs(req, &args); e != nil {
 		return e, nil
@@ -174,18 +193,23 @@ func handleRollTORCheck(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallT
 		Weariness:    args.Weariness,
 		Miserable:    args.Miserable,
 	})
-	return jsonResult(map[string]any{
-		"feat_die":         res.FeatDie,
-		"gandalf_rune":     res.GandalfRune,
-		"eye_of_sauron":    res.EyeOfSauron,
-		"success_dice":     res.SuccessDice,
-		"effective_dice":   res.EffectiveSuccessDice,
-		"total":            res.Total,
-		"succeeds":         res.Succeeds,
-		"margin":           res.Margin,
-		"miserable_eye":    res.MiserableEye,
-		"target_number":    args.TargetNumber,
-	}), nil
+	out := map[string]any{
+		"feat_die":       res.FeatDie,
+		"gandalf_rune":   res.GandalfRune,
+		"eye_of_sauron":  res.EyeOfSauron,
+		"success_dice":   res.SuccessDice,
+		"effective_dice": res.EffectiveSuccessDice,
+		"total":          res.Total,
+		"succeeds":       res.Succeeds,
+		"margin":         res.Margin,
+		"miserable_eye":  res.MiserableEye,
+		"target_number":  args.TargetNumber,
+	}
+	if style := format.UnmarshalStyle(args.Format); style != format.StyleNone {
+		out["formatted"] = format.TORCheck(res, style)
+		out["format"] = string(style)
+	}
+	return jsonResult(out), nil
 }
 
 // ---- tool: roll_tor_combat ----
@@ -217,6 +241,7 @@ func addRollTORCombat(server *mcp.Server) {
 					Type:        "boolean",
 					Description: "When true, Eye results trigger MiserableEye flag.",
 				},
+				"format": formatSchema,
 			},
 			Required: []string{"attacker_skill", "defender_tn"},
 		},
@@ -226,10 +251,11 @@ func addRollTORCombat(server *mcp.Server) {
 
 func handleRollTORCombat(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var args struct {
-		AttackerSkill int  `json:"attacker_skill"`
-		DefenderTN    int  `json:"defender_tn"`
-		Weariness     bool `json:"weariness"`
-		Miserable     bool `json:"miserable"`
+		AttackerSkill int    `json:"attacker_skill"`
+		DefenderTN    int    `json:"defender_tn"`
+		Weariness     bool   `json:"weariness"`
+		Miserable     bool   `json:"miserable"`
+		Format        string `json:"format"`
 	}
 	if e := decodeArgs(req, &args); e != nil {
 		return e, nil
@@ -243,7 +269,7 @@ func handleRollTORCombat(_ context.Context, req *mcp.CallToolRequest) (*mcp.Call
 		Weariness:     args.Weariness,
 		Miserable:     args.Miserable,
 	})
-	return jsonResult(map[string]any{
+	out := map[string]any{
 		"feat_die":      res.FeatDie,
 		"gandalf_rune":  res.GandalfRune,
 		"eye_of_sauron": res.EyeOfSauron,
@@ -253,7 +279,15 @@ func handleRollTORCombat(_ context.Context, req *mcp.CallToolRequest) (*mcp.Call
 		"margin":        res.Margin,
 		"miserable_eye": res.MiserableEye,
 		"defender_tn":   args.DefenderTN,
-	}), nil
+	}
+	if style := format.UnmarshalStyle(args.Format); style != format.StyleNone {
+		// Combat result shares the CheckResult shape — render via the
+		// same formatter using a synthesized CheckResult-equivalent.
+		// (ResolveCombat returns a CheckResult under the hood.)
+		out["formatted"] = format.TORCheck(res, style)
+		out["format"] = string(style)
+	}
+	return jsonResult(out), nil
 }
 
 // ---- schema helpers ----
