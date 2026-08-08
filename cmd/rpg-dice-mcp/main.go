@@ -50,9 +50,16 @@ func main() {
 		// Streamable HTTP transport — for in-cluster deployment.
 		// The handler factory returns the same server for every request
 		// (single-tenant; dice rolls are stateless).
+		// Stateless: true (homelab#755) -- without it the SDK requires the
+		// Mcp-Session-Id from a session's initialize handshake to be
+		// re-presented to the SAME replica on every subsequent request. A
+		// plain round-robin Service would break that the moment a
+		// follow-up lands on a different pod, blocking safe horizontal
+		// scaling. Matches the fix already applied to the Python
+		// (FastMCP) wrappers' stateless_http=True.
 		mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 			return server
-		}, nil)
+		}, &mcp.StreamableHTTPOptions{Stateless: true})
 
 		// Separate /healthz route so kubelet liveness/readiness probes
 		// don't trip over the MCP streamable handler — it doesn't 200
